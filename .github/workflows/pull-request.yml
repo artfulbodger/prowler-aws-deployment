@@ -8,8 +8,15 @@ on:
       - synchronize
 
 jobs:
-  main:
+  job1:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@v4
+  job2:
+    name: CF_Nag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: stelligent/cfn_nag@master
+        with:
+          input_path: templates
