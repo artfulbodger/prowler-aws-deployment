@@ -21,4 +21,4 @@ jobs:
     steps:
       - uses: stelligent/cfn_nag@master
         with:
-          input_path: templates
+          input_path: Templates
