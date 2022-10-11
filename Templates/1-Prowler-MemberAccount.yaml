@@ -36,13 +36,6 @@ Parameters:
     Default: ProwlerExecution-Role
 
 Resources:
-  SecurityHubWithTags:
-    Type: "AWS::SecurityHub::Hub"
-    Properties:
-      Tags:
-        App: Prowler
-        Orchestration: !Ref AWS::StackName
-
   LambdaFunctionEnableProwlerIntegration:
     Type: AWS::Lambda::Function
     Properties:
