@@ -177,6 +177,6 @@ Resources:
                   - securityhub:GetFindings
 
 Outputs:
-  ProwlerS3Storage:
+  ProwlerCrossAccountRole:
     Description: CrossAccount Role to be created for Prowler to assess all Accounts in the AWS Organization
     Value: !Ref ProwlerCrossAccountRole
