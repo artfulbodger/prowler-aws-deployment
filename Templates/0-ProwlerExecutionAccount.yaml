@@ -293,3 +293,210 @@ Resources:
               - !GetAtt LambdaFunctionKdfTransformation.Arn
       Roles:
         - !Ref FirehoseDeliveryRole
+
+  executeCreateSecurityHubDatabase:
+    Type: Custom::executeAthenaQuery
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionExecuteQuery.Arn
+      queryoutput:
+        !Join ["", ["s3://", !Ref ProwlerS3Bucket, "/athena-results"]]
+      QueryString: "CREATE DATABASE IF NOT EXISTS SecurityHub;"
+
+  executeCreateSecurityHubFindingsTable:
+    Type: Custom::executeAthenaQuery
+    DependsOn: executeCreateSecurityHubDatabase
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionExecuteQuery.Arn
+      queryoutput:
+        !Join ["", ["s3://", !Ref ProwlerS3Bucket, "/athena-results"]]
+      QueryString: !Join
+        - ""
+        - - "CREATE EXTERNAL TABLE IF NOT EXISTS SecurityHub.securityhubfindings ( "
+          - "id string, "
+          - " detail struct<findings :array<struct<"
+          - " AwsAccountId:string,"
+          - " CreatedAt:string,"
+          - " UpdatedAt:string,"
+          - " Description:string,"
+          - " ProductArn:string,"
+          - " GeneratorId:string,"
+          - " Region:string,"
+          - " Compliance:struct<status:string>,"
+          - " Workflow:struct<status:string>,"
+          - " Types:string,"
+          - " Title:string,"
+          - " Severity:struct<Label:string>,"
+          - " Resources:array<struct<Id:string, Type:string>>>>> )"
+          - " PARTITIONED BY ( datehour string) "
+          - " ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe' "
+          - " STORED AS INPUTFORMAT 'org.apache.hadoop.mapred.TextInputFormat' "
+          - " OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.IgnoreKeyTextOutputFormat' "
+          - " LOCATION 's3://"
+          - !Ref ProwlerS3Bucket
+          - "/raw' "
+          - " TBLPROPERTIES ( "
+          - " 'projection.datehour.format'='yyyy/MM/dd', "
+          - " 'projection.datehour.interval'='1', "
+          - " 'projection.datehour.interval.unit'='DAYS', "
+          - " 'projection.datehour.range'='2021/07/01,NOW', "
+          - " 'projection.datehour.type'='date', "
+          - " 'projection.enabled'='true', "
+          - " 'storage.location.template'='s3://"
+          - !Ref ProwlerS3Bucket
+          - "/raw/firehose/${datehour}')"
+
+  executeCreateSecurityHubFindingsView:
+    Type: Custom::executeAthenaQuery
+    DependsOn: executeCreateSecurityHubFindingsTable
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionExecuteQuery.Arn
+      queryoutput:
+        !Join ["", ["s3://", !Ref ProwlerS3Bucket, "/athena-results"]]
+      QueryString: !Join
+        - ""
+        - - "CREATE OR REPLACE VIEW SecurityHub.securityhubfindingsview AS "
+          - " SELECT "
+          - " id"
+          - ", detail.findings[1].awsaccountid awsaccountid"
+          - ", detail.findings[1].CreatedAt CreatedAt"
+          - ", detail.findings[1].UpdatedAt UpdatedAt"
+          - ", detail.findings[1].ProductArn ProductArn"
+          - ", detail.findings[1].GeneratorId CheckId"
+          - ", detail.findings[1].Region Region"
+          - ", detail.findings[1].Workflow.status WorflowStatus"
+          - ", detail.findings[1].Compliance.status ComplianceStatus"
+          - ", detail.findings[1].Types FindingType"
+          - ", detail.findings[1].Title FindingTitle"
+          - ", detail.findings[1].Description FindingDescription"
+          - ", detail.findings[1].Severity.Label Severity"
+          - ", detail.findings[1].Resources[1].Type ResourceType"
+          - ", detail.findings[1].Resources[1].Id ResourceId"
+          - " FROM "
+          - " SecurityHub.securityhubfindings "
+          - " WHERE (detail.findings[1].awsaccountid IS NOT NULL) "
+
+  LambdaFunctionExecuteQuery:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          # SPDX-License-Identifier: MIT-0
+          import boto3
+          import time
+          import os
+          import cfnresponse
+          from botocore.exceptions import ClientError
+          def lambda_handler(event, context):
+            if (event['RequestType'] == 'Create' or event['RequestType'] == 'Update'):
+              try:
+                client = boto3.client('athena')
+                query = event['ResourceProperties']['QueryString']
+                print(query)
+                queryoutput = event['ResourceProperties']['queryoutput']
+                response = client.start_query_execution(QueryString=query, ResultConfiguration={'OutputLocation': queryoutput}, WorkGroup=os.getenv('athena_workgroup'))
+                print(response)
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as ex:
+                print(ex)
+                cfnresponse.send(event, context, cfnresponse.FAILED, {})
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+      Handler: index.lambda_handler
+      Role: !GetAtt IAMRoleExecuteQueryAthena.Arn
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 200
+      Description: Lambda for Athena Execute Query
+      Environment:
+        Variables:
+          bucket_name: !Ref ProwlerS3Bucket
+          athena_workgroup: !Ref AthenaWorkGroup
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Description: Athena WorkGroup for SecurityHub
+      Name: !Sub "Athena-WorkGroup-${AWS::StackName}"
+      RecursiveDeleteOption: True
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: True
+        PublishCloudWatchMetricsEnabled: True
+        RequesterPaysEnabled: False
+        ResultConfiguration:
+          OutputLocation:
+            !Join ["", ["s3://", !Ref ProwlerS3Bucket, "/athena-results"]]
+
+  IAMRoleExecuteQueryAthena:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: getS3Data
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:ListMultipartUploadParts
+                  - s3:AbortMultipartUpload
+                  - s3:PutObject
+                Resource:
+                  - !Join ["", ["arn:aws:s3:::", !Ref S3BucketAthenaWorkGroup]]
+                  - !Join [
+                      "",
+                      ["arn:aws:s3:::", !Ref S3BucketAthenaWorkGroup, "/*"],
+                    ]
+                  - !Join ["", ["arn:aws:s3:::", !Ref ProwlerS3Bucket]]
+                  - !Join ["", ["arn:aws:s3:::", !Ref ProwlerS3Bucket, "/*"]]
+              - Effect: Allow
+                Action:
+                  - glue:CreateDatabase
+                  - glue:CreateTable
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTables
+                  - glue:GetTable
+                Resource:
+                  - !Sub arn:aws:glue:*:${AWS::AccountId}:catalog
+                  - !Sub arn:aws:glue:*:${AWS::AccountId}:database/*
+                  - !Sub arn:aws:glue:*:${AWS::AccountId}:table/*/*
+        - PolicyName: queryAthena
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:CreateNamedQuery
+                  - athena:CreateWorkGroup
+                Resource:
+                  - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}"
+
+  S3BucketAthenaWorkGroup:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
