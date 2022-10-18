@@ -175,3 +175,8 @@ Resources:
                   - securityhub:EnableImportFindingsForProduct
                   - securityhub:BatchImportFindings
                   - securityhub:GetFindings
+
+Outputs:
+  ProwlerS3Storage:
+    Description: CrossAccount Role to be created for Prowler to assess all Accounts in the AWS Organization
+    Value: !Ref ProwlerCrossAccountRole
