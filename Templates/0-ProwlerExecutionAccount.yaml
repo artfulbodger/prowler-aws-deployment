@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Creates the "
+Description: "Creates the S3 resources for the Prowler inetgration, and configures Security Hub in this Region as the Aggreation account."
 Parameters:
   ProwlerExecutionOrgID:
     Type: String
@@ -34,6 +34,12 @@ Resources:
         BlockPublicPolicy: True
         IgnorePublicAcls: True
         RestrictPublicBuckets: True
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteRawFiles
+            Prefix: raw/firehose/
+            Status: Enabled
+            ExpirationInDays: 7
       VersioningConfiguration:
         Status: Enabled
       Tags:
@@ -54,3 +60,71 @@ Resources:
             Condition:
               StringEquals:
                 aws:PrincipalOrgID: !Ref ProwlerExecutionOrgID
+  LambdaFunctionEnableSHXRAggregation:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          # SPDX-License-Identifier: MIT-0
+          import sys,json,boto3,time,os
+          import cfnresponse
+          from botocore.exceptions import ClientError
+
+          def lambda_handler(event, context):
+            print('this is the event ' + json.dumps(event))
+            StackName = event['StackId']
+            LogicalResourceId = event['LogicalResourceId']
+            UniqueId = event['RequestId']
+            props = event['ResourceProperties']
+            if (event['RequestType'] == 'Create' or event['RequestType'] == 'Update'):
+              try:                
+                region = os.environ['AWS_REGION']
+                securityhub_client = boto3.client('securityhub', region_name=region)
+                response = securityhub_client.create_finding_aggregator(RegionLinkingMode='ALL_REGIONS')
+                print(response)
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {},"LambdaFunctionEnableSHXRAggregationInvoke")
+              except Exception as ex:
+                print(ex)
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+      Handler: index.lambda_handler
+      Role: !GetAtt IAMRoleEnableSHXRAggregation.Arn
+      Runtime: python3.8
+      FunctionName: LambdaFunctionEnableSHXRAggregation
+      MemorySize: 256
+      Timeout: 300
+      Description: Lambda that enables SecurityHub Cross-region Aggregation
+  IAMRoleEnableSHXRAggregation:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: IAMRoleEnableSHXRAggregation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - securityhub:CreateFindingAggregator
+                  - securityhub:GetFindingAggregator
+                  - securityhub:ListFindingAggregators
+                  - securityhub:UpdateFindingAggregator
+                Resource:
+                  - !Sub "arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:/findingAggregator/create"
+  LambdaFunctionEnableSHXRAggregationInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LambdaFunctionEnableSHXRAggregation.Arn
