@@ -1,0 +1,213 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates a CodeBuild project to audit an AWS account with Prowler and stores the html report in a S3 bucket.
+Parameters:
+  AwsOrgId:
+    Type: String
+    Description: Enter AWS Organizations ID
+    AllowedPattern: ^o-[a-z0-9]{10,32}$
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters.
+    Default: o-sj9idjunfw
+  CodeBuildRole:
+    Description: Enter Name for CodeBuild Role to create
+    Type: String
+    AllowedPattern: ^[\w+=,.@-]{1,64}$
+    ConstraintDescription: Max 64 alphanumeric characters. Also special characters supported [+, =, ., @, -]
+    Default: ProwlerCodeBuild-Role
+  CrossAccountRole:
+    Type: String
+    Description: Enter CrossAccount Role Prowler will be using to assess AWS Accounts in the AWS Organization. (ProwlerCrossAccountRole)
+    AllowedPattern: ^[\w+=,.@-]{1,64}$
+    ConstraintDescription: Max 64 alphanumeric characters. Also special characters [+, =, ., @, -]
+    Default: ProwlerXA-CBRole
+
+Resources:
+  ProwlerAllowListDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "account_id"
+          AttributeType: "S"
+        - AttributeName: "rule"
+          AttributeType: "S"
+      BillingMode: "PAY_PER_REQUEST"
+      KeySchema:
+        - AttributeName: "account_id"
+          KeyType: "HASH"
+        - AttributeName: "rule"
+          KeyType: "RANGE"
+      TableClass: "STANDARD"
+      TableName: "ProwlerAllowList"
+      Tags:
+        - Key: App
+          Value: Prowler
+  ProwlerCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Prowler CodeBuild Role
+      RoleName: !Ref CodeBuildRole
+      Tags:
+        - Key: App
+          Value: Prowler
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: Prowler-S3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowGetPutListObject
+                Effect: Allow
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:s3:::${BucketName}"
+                    - BucketName: !ImportValue ProwlerS3Storage
+                  - !Sub
+                    - "arn:${AWS::Partition}:s3:::${BucketName}/*"
+                    - BucketName: !ImportValue ProwlerS3Storage
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:PutObjectAcl
+              - Sid: AllowReadOnlyS3Access
+                Effect: Allow
+                Resource: "*"
+                Action:
+                  - "s3:Get*"
+                  - "s3:List*"
+        - PolicyName: Prowler-CrossAccount-AssumeRole
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowStsAssumeRole
+                Effect: Allow
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:iam::*:role/${RoleName}"
+                    - RoleName: !ImportValue ProwlerCrossAccountRole
+                Action: sts:AssumeRole
+                Condition:
+                  StringEquals:
+                    aws:PrincipalOrgId: !Ref AwsOrgId
+        - PolicyName: Prowler-CloudWatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowCreateLogs
+                Effect: Allow
+                Resource: !Sub arn:${AWS::Partition}:logs:*:*:log-group:*
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+              - Sid: AllowPutevent
+                Effect: Allow
+                Resource: !Sub arn:${AWS::Partition}:logs:*:*:log-group:*:log-stream:*
+                Action:
+                  - logs:PutLogEvents
+        - PolicyName: Prowler-DynamoDBTable
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AllowAccessToTable
+                Effect: Allow
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProwlerAllowListDynamoDBTable}
+                Action: dynamodb:PartiQLSelect
+    DependsOn: ProwlerAllowListDynamoDBTable
+
+  ProwlerCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: S3
+        Location: !Sub
+          - "${BucketName}/scripts/run-prowler-reports.sh.zip"
+          - BucketName: !ImportValue ProwlerS3Storage
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.8
+              commands:
+                - echo "Updating yum ..."
+                - yum -y update --skip-broken
+                - echo "Updating pip ..."
+                - python -m pip install --upgrade pip
+                - echo "Installing requirements ..."
+                - pip install "git+https://github.com/ibm/detect-secrets.git@master#egg=detect-secrets"
+            build:
+              commands:
+                - echo "Running Prowler with script"
+                - chmod +x run-prowler-reports.sh
+                - ./run-prowler-reports.sh
+            post_build:
+              commands:
+                - echo "Done!"
+      Environment:
+        # AWS CodeBuild free tier includes 100 build minutes of BUILD_GENERAL1_SMALL per month.
+        # BUILD_GENERAL1_SMALL: Use up to 3 GB memory and 2 vCPUs for builds. $0.005/minute.
+        # BUILD_GENERAL1_MEDIUM: Use up to 7 GB memory and 4 vCPUs for builds. $0.01/minute.
+        # BUILD_GENERAL1_LARGE: Use up to 15 GB memory and 8 vCPUs for builds. $0.02/minute.
+        # BUILD_GENERAL1_2XLARGE: Use up to 144 GB memory and 72 vCPUs for builds. $0.20/minute.
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        Image: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+        Type: "LINUX_CONTAINER"
+        EnvironmentVariables:
+          - Name: "ROLE"
+            Value: !ImportValue ProwlerCrossAccountRole
+            Type: PLAINTEXT
+          - Name: "ALLOWLIST"
+            Value: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProwlerAllowListDynamoDBTable}
+            Type: PLAINTEXT
+      Description: Run Prowler assessment
+      ServiceRole: !GetAtt ProwlerCodeBuildRole.Arn
+      TimeoutInMinutes: 300
+    DependsOn: ProwlerAllowListDynamoDBTable
+
+  ProwlerCWRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: ProwlerCWRuleRole
+      RoleName: ProwlerCWRule-Role
+      Policies:
+        - PolicyName: Rule-Events
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: AWSEventInvokeCodeBuild
+                Effect: Allow
+                Resource: "*"
+                Action:
+                  - codebuild:StartBuild
+
+  ProwlerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: This rule will trigger CodeBuild to audit AWS Accounts in my Organization with Prowler
+      ScheduleExpression: cron(0 21 * * ? *)
+      RoleArn: !GetAtt ProwlerCWRuleRole.Arn
+      Name: ProwlerExecuteRule
+      State: ENABLED
+      Targets:
+        - Arn: !Sub ${ProwlerCodeBuild.Arn}
+          Id: Prowler-CodeBuild-Target
+          RoleArn: !GetAtt ProwlerCWRuleRole.Arn
