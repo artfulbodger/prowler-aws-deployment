@@ -14,12 +14,6 @@ Parameters:
     AllowedPattern: ^[\w+=,.@-]{1,64}$
     ConstraintDescription: Max 64 alphanumeric characters. Also special characters supported [+, =, ., @, -]
     Default: ProwlerCodeBuild-Role
-  CrossAccountRole:
-    Type: String
-    Description: Enter CrossAccount Role Prowler will be using to assess AWS Accounts in the AWS Organization. (ProwlerCrossAccountRole)
-    AllowedPattern: ^[\w+=,.@-]{1,64}$
-    ConstraintDescription: Max 64 alphanumeric characters. Also special characters [+, =, ., @, -]
-    Default: ProwlerXA-CBRole
 
 Resources:
   ProwlerAllowListDynamoDBTable:
