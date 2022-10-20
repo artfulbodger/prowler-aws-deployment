@@ -98,7 +98,7 @@ Resources:
                   - securityhub:EnableImportFindingsForProduct
                   - securityhub:DisableImportFindingsForProduct
                 Resource:
-                  - !Sub "arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:hub/default"
+                  - !Sub "arn:${AWS::Partition}:securityhub:${AWS::Region}:${AWS::AccountId}:hub/default"
 
   LambdaFunctionEnableProwlerIntegrationInvoke:
     Type: AWS::CloudFormation::CustomResource
@@ -180,3 +180,5 @@ Outputs:
   ProwlerCrossAccountRole:
     Description: CrossAccount Role to be created for Prowler to assess all Accounts in the AWS Organization
     Value: !Ref ProwlerCrossAccountRole
+    Export:
+      Name: ProwlerCrossAccountRole
