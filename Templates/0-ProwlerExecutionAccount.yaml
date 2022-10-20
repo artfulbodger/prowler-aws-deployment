@@ -500,3 +500,10 @@ Resources:
         BlockPublicPolicy: True
         IgnorePublicAcls: True
         RestrictPublicBuckets: True
+
+Outputs:
+  ProwlerS3Storage:
+    Description: S3 Bucket for Prowler RStorage
+    Value: !Ref ProwlerS3Bucket
+    Export:
+      Name: ProwlerS3Storage
